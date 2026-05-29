@@ -1,87 +1,45 @@
 import streamlit as st
 from openai import OpenAI
-from pypdf import PdfReader
 
-# ---------------- PAGE SETUP ----------------
+from utils.loader import load_pdf, chunk_text
+from utils.embedder import create_embeddings
+from utils.retriever import retrieve
 
 st.set_page_config(
-    page_title="AI Chatbot",
-    page_icon="🤖",
-    layout="centered"
+    page_title="RAG Chatbot",
+    page_icon="🤖"
 )
 
-st.title("🤖 AI Chatbot")
-st.caption("Normal Chat + PDF Chat")
-
-# ---------------- SIDEBAR ----------------
-
-st.sidebar.header("Settings")
+st.title("🤖 RAG Chatbot")
 
 api_key = st.sidebar.text_input(
-    "Enter your Groq API Key",
+    "Groq API Key",
     type="password"
 )
 
-MODEL = st.sidebar.selectbox(
-    "Choose Model",
-    [
-        "llama-3.1-8b-instant",
-        "llama-3.3-70b-versatile"
-    ]
-)
-
 uploaded_file = st.sidebar.file_uploader(
-    "Upload PDF (Optional)",
+    "Upload PDF",
     type="pdf"
 )
 
-# ---------------- CHAT HISTORY ----------------
+MODEL = "llama-3.1-8b-instant"
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# ---------------- PDF TEXT EXTRACTION ----------------
+for msg in st.session_state.messages:
 
-pdf_text = ""
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-if uploaded_file:
-
-    pdf_reader = PdfReader(uploaded_file)
-
-    for page in pdf_reader.pages:
-
-        text = page.extract_text()
-
-        if text:
-            pdf_text += text
-
-    st.sidebar.success("PDF Loaded Successfully!")
-
-# ---------------- DISPLAY CHAT ----------------
-
-for message in st.session_state.messages:
-
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# ---------------- CLEAR CHAT ----------------
-
-if st.sidebar.button("Clear Chat"):
-    st.session_state.messages = []
-    st.rerun()
-
-# ---------------- USER INPUT ----------------
-
-prompt = st.chat_input("Ask anything...")
+prompt = st.chat_input("Ask something...")
 
 if prompt:
 
-    # API key check
     if not api_key:
         st.error("Please enter your Groq API key.")
         st.stop()
 
-    # Save user message
     st.session_state.messages.append(
         {
             "role": "user",
@@ -89,76 +47,68 @@ if prompt:
         }
     )
 
-    # Show user message
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Create Groq client
     client = OpenAI(
         api_key=api_key,
         base_url="https://api.groq.com/openai/v1"
     )
 
-    # ---------------- WITH PDF ----------------
+    # NORMAL CHAT MODE
+    final_prompt = prompt
 
-    if uploaded_file and pdf_text.strip():
+    # PDF RAG MODE
+    if uploaded_file:
 
-        context = pdf_text[:12000]
+        text = load_pdf(uploaded_file)
 
-        enhanced_prompt = f"""
-You are a helpful AI assistant.
+        chunks = chunk_text(text)
 
-Use the PDF content below to answer the question whenever relevant.
+        vectorizer, vectors = create_embeddings(chunks)
 
-PDF CONTENT:
+        relevant_chunks = retrieve(
+            prompt,
+            vectorizer,
+            vectors,
+            chunks
+        )
+
+        context = "\n\n".join(relevant_chunks)
+
+        final_prompt = f"""
+Answer the question using the document context below.
+
+DOCUMENT:
+
 {context}
 
 QUESTION:
+
 {prompt}
-
-If the answer is not in the PDF,
-you may still answer normally using your own knowledge.
 """
-
-    # ---------------- NORMAL CHAT ----------------
-
-    else:
-
-        enhanced_prompt = prompt
-
-    # ---------------- AI RESPONSE ----------------
 
     with st.chat_message("assistant"):
 
         with st.spinner("Thinking..."):
 
-            try:
-
-                response = client.chat.completions.create(
-                    model=MODEL,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a helpful AI assistant."
-                        },
-                        {
-                            "role": "user",
-                            "content": enhanced_prompt
-                        }
-                    ]
-                )
-
-                reply = response.choices[0].message.content
-
-                st.markdown(reply)
-
-                # Save assistant reply
-                st.session_state.messages.append(
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[
                     {
-                        "role": "assistant",
-                        "content": reply
+                        "role": "user",
+                        "content": final_prompt
                     }
-                )
+                ]
+            )
 
-            except Exception as e:
-                st.error(f"Error: {e}")
+            reply = response.choices[0].message.content
+
+            st.markdown(reply)
+
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": reply
+        }
+    )
